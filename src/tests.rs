@@ -379,3 +379,32 @@ fn select_count_from_table_with_condition_1() {
         ]
     );
 }
+
+#[test]
+fn scalar_subquery() {
+    // let (builder, t1) = EmptySelectBuilder::new().source("table1");
+    let (sub_builder, t1) = EmptySelectBuilder::new().source("table1");
+    let mut buf = Vec::new();
+    let mut params = Vec::new();
+    let exp = SqlInt::new(1).eq(sub_builder.select(t1.column("c1")));
+    exp.build_sql(&mut buf, &mut params)
+        .expect("Success building SQL");
+
+    assert_eq!(buf, b"? = (SELECT t1.c1 FROM table1 as t1)");
+    assert_eq!(params, &[Value::Int(1)]);
+}
+
+#[test]
+fn tuple_subquery() {
+    // let (builder, t1) = EmptySelectBuilder::new().source("table1");
+    let (sub_builder, t1) = EmptySelectBuilder::new().source("table1");
+    let mut buf = Vec::new();
+    let mut params = Vec::new();
+    let exp = Record::new((SqlInt::new(1), SqlString::new("aiueo")))
+        .eq(sub_builder.select((t1.typed_column("c1"), t1.typed_column("c2"))));
+    exp.build_sql(&mut buf, &mut params)
+        .expect("Success building SQL");
+
+    assert_eq!(buf, b"(?, ?) = (SELECT t1.c1, t1.c2 FROM table1 as t1)");
+    assert_eq!(params, &[Value::Int(1), Value::String("aiueo".to_string())]);
+}

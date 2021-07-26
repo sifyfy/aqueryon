@@ -654,6 +654,42 @@ where
     }
 }
 
+impl<QS, C, W, G, H, O, L, LM> BuildSql for SelectBuilder<QS, W, C, G, H, O, L, LM>
+where
+    QS: BuildSql,
+    C: BuildSql,
+    W: BuildSql,
+    G: BuildSql,
+    H: BuildSql,
+    O: BuildSql,
+    L: BuildSql,
+    LM: BuildSql,
+{
+    fn build_sql(&self, buf: &mut Vec<u8>, params: &mut Vec<Value>) -> Result<(), BuildSqlError> {
+        write!(buf, "(SELECT ")?;
+        self.columns.build_sql(buf, params)?;
+        self.sources.build_sql(buf, params)?;
+        self.filter.build_sql(buf, params)?;
+        self.group_by.build_sql(buf, params)?;
+        self.having.build_sql(buf, params)?;
+        self.order_by.build_sql(buf, params)?;
+        self.limit.build_sql(buf, params)?;
+        self.lock_mode.build_sql(buf, params)?;
+        write!(buf, ")")?;
+        Ok(())
+    }
+}
+
+impl<QS, W, C, G, H, O, L, LM> Expression for SelectBuilder<QS, W, C, G, H, O, L, LM>
+where
+    C: Columns,
+{
+    type SqlType = C::SqlType;
+    type Term = Monomial;
+    type BoolOperation = NonBool;
+    type Aggregation = NonAggregate; // サブクエリなので必ず値になる
+}
+
 #[derive(Debug, Clone)]
 pub struct Query {
     sql: String,
@@ -700,6 +736,13 @@ pub enum Value {
     String(String),
     Int(i64),
     Uint(u64),
+}
+
+impl Expression for Value {
+    type SqlType = SqlTypeAny;
+    type Term = Monomial;
+    type BoolOperation = BoolMono;
+    type Aggregation = NonAggregate;
 }
 
 impl From<&str> for Value {
@@ -1051,6 +1094,10 @@ where
         Column::new(self.alias.clone(), column_name)
     }
 
+    pub fn typed_column<T: Default>(&self, column_name: impl AsColumnName + Sized) -> Column<T> {
+        Column::new(self.alias.clone(), column_name)
+    }
+
     pub fn alias(&self) -> String {
         self.alias.to_string()
     }
@@ -1340,15 +1387,13 @@ impl BuildSql for Limit {
 }
 
 pub trait Columns {
+    type SqlType;
     type Aggregation;
 }
 
 impl<E: Expression> Columns for E {
+    type SqlType = E::SqlType;
     type Aggregation = E::Aggregation;
-}
-
-impl Columns for Value {
-    type Aggregation = NonAggregate;
 }
 
 #[derive(Debug, Clone)]
@@ -1364,6 +1409,7 @@ impl<T> Columns for Distinct<T>
 where
     T: Columns<Aggregation = NonAggregate>,
 {
+    type SqlType = T::SqlType;
     type Aggregation = T::Aggregation;
 }
 
@@ -1374,6 +1420,7 @@ impl<T: BuildSql> BuildSql for Distinct<T> {
     }
 }
 
+/// Build SQL string as a part of SQL.
 pub trait BuildSql {
     fn build_sql(&self, buf: &mut Vec<u8>, params: &mut Vec<Value>) -> Result<(), BuildSqlError>;
 }
@@ -1393,10 +1440,29 @@ impl<ST> BuildSql for Column<ST> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Record<T> {
+    columns: T,
+}
+
+impl<T> Record<T> {
+    pub fn new(columns: T) -> Record<T> {
+        Record { columns }
+    }
+}
+
 impl<A> Columns for (A,)
 where
-    A: Columns,
+    A: Expression,
 {
+    type SqlType = (A::SqlType,);
+    type Aggregation = A::Aggregation;
+}
+
+impl<A: Expression> Expression for Record<(A,)> {
+    type SqlType = A::SqlType;
+    type Term = A::Term;
+    type BoolOperation = A::BoolOperation;
     type Aggregation = A::Aggregation;
 }
 
@@ -1429,6 +1495,19 @@ macro_rules! impl_traits_for_tuple {
             $($type_param: Columns,)*
             <$type_paramA>::Aggregation: Aggregation<recursive_aggregation!( $( <$type_param>::Aggregation, )* )>,
         {
+            type SqlType = ( $type_paramA::SqlType, $( $type_param::SqlType, )* );
+            type Aggregation = <<$type_paramA>::Aggregation as Aggregation<recursive_aggregation!( $( <$type_param>::Aggregation, )* )>>::Output;
+        }
+
+        impl<$type_paramA $(, $type_param)*> Expression for Record<($type_paramA $(, $type_param)*)>
+        where
+            $type_paramA: Expression,
+            $($type_param: Expression,)*
+            <$type_paramA>::Aggregation: Aggregation<recursive_aggregation!( $( <$type_param>::Aggregation, )* )>,
+        {
+            type SqlType = ( $type_paramA::SqlType, $( $type_param::SqlType, )* );
+            type Term = Polynomial;
+            type BoolOperation = BoolMono;
             type Aggregation = <<$type_paramA>::Aggregation as Aggregation<recursive_aggregation!( $( <$type_param>::Aggregation, )* )>>::Output;
         }
 
@@ -1451,6 +1530,23 @@ macro_rules! impl_traits_for_tuple {
                     self.$field.build_sql(buf, params)?;
                 )*
 
+                Ok(())
+            }
+        }
+
+        impl<$type_paramA $(, $type_param)*> BuildSql for Record<($type_paramA $(, $type_param)*)>
+        where
+            $type_paramA: BuildSql,
+            $($type_param: BuildSql,)*
+        {
+            fn build_sql(&self, buf: &mut Vec<u8>, params: &mut Vec<Value>) -> Result<(), BuildSqlError> {
+                write!(buf, "(")?; // Rowって付けた方がいい？
+                self.columns.$field0.build_sql(buf, params)?;
+                $(
+                    write!(buf, ", ")?;
+                    self.columns.$field.build_sql(buf, params)?;
+                )*
+                write!(buf, ")")?;
                 Ok(())
             }
         }
@@ -1662,6 +1758,17 @@ impl_traits_for_tuple!(
     AC, 28, AD, 29, AE, 30, AF, 31, AG, 32, AH, 33, AI, 34, AJ, 35, AK, 36, AL, 37, AM, 38, AN, 39,
     AO, 40, AP, 41, AQ, 42, AR, 43, AS, 44, AT, 45, AU, 46, AV, 47, AW, 48, AX, 49, AY, 50, AZ, 51
 );
+
+#[derive(Debug, Clone)]
+pub struct Row<T> {
+    columns: T,
+}
+
+impl<T: Columns> Row<T> {
+    pub fn new(columns: T) -> Row<T> {
+        Row { columns }
+    }
+}
 
 /// 事前にコードレベルでSQL上での型が確定できない場合に使用する。
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
@@ -2569,6 +2676,9 @@ macro_rules! build_sql_comma_separated_values {
     ( $x:ident, ) => {};
 }
 
+// SQLは動的型付けなので関数も動的な型に対応できる必要がある。
+// 例えばsumは整数型にも実数型にも使えるので、複数の型を取り得る。
+// なので関数はtraitとして実装した方が良いのではないか？
 define_sql_function!(Sum, sum(t: SqlTypeInt) -> SqlTypeInt, Aggregate);
 define_sql_function!(Count, count(t: SqlTypeAny) -> SqlTypeInt, Aggregate);
 
