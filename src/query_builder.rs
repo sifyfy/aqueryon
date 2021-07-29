@@ -115,6 +115,7 @@ define_select_clause!(HavingClause, EmptyHavingClause, " HAVING ");
 define_select_clause!(OrderByClause, EmptyOrderByClause, " ORDER BY ");
 define_select_clause!(LimitClause, EmptyLimitClause, " LIMIT ");
 
+#[derive(Debug, Clone)]
 pub struct SelectBuilder<QS, W, C, G, H, O, L, LM> {
     sources: QS,
     sources_num: u8,
@@ -1020,7 +1021,7 @@ impl<ST> Expression for Column<ST> {
     type Aggregation = NonAggregate;
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SourceAliasName {
     name: Rc<RefCell<&'static str>>,
 }
@@ -1896,6 +1897,102 @@ impl_bool_binary_operators!(
     (NotLike, " NOT LIKE "),
 );
 
+macro_rules! impl_subquery_bool_binary_operators {
+    ( $( ( $ty:ident, $op:expr ) ),* $(,)* ) => {
+        $(
+            #[derive(Debug, Clone)]
+            pub struct $ty<Lhs, QS, W, C, G, H, O, L, LM>
+            where
+                C: Columns,
+                Lhs: Expression,
+                Lhs::SqlType: Comparable<C::SqlType>,
+            {
+                lhs: Lhs,
+                rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+            }
+
+            impl<Lhs, QS, W, C, G, H, O, L, LM> Expression for $ty<Lhs, QS, W, C, G, H, O, L, LM>
+            where
+                C: Columns,
+                Lhs: Expression,
+                Lhs::SqlType: Comparable<C::SqlType>,
+            {
+                type SqlType = SqlTypeBool;
+                type Term = Polynomial;
+                type BoolOperation = BoolMono;
+                type Aggregation = NonAggregate;
+            }
+
+            impl<Lhs, QS, W, C, G, H, O, L, LM> AndOperatorMethod for $ty<Lhs, QS, W, C, G, H, O, L, LM>
+            where
+                C: Columns,
+                Lhs: Expression,
+                Lhs::SqlType: Comparable<C::SqlType>,
+                Self: Expression<SqlType = SqlTypeBool>,
+            {}
+
+            impl<Lhs, QS, W, C, G, H, O, L, LM> OrOperatorMethod for $ty<Lhs, QS, W, C, G, H, O, L, LM>
+            where
+                C: Columns,
+                Lhs: Expression,
+                Lhs::SqlType: Comparable<C::SqlType>,
+                Self: Expression<SqlType = SqlTypeBool>,
+            {}
+
+            impl<Lhs, QS, W, C, G, H, O, L, LM> NotOperatorMethod for $ty<Lhs, QS, W, C, G, H, O, L, LM>
+            where
+                C: Columns,
+                Lhs: Expression,
+                Lhs::SqlType: Comparable<C::SqlType>,
+                Self: Expression<SqlType = SqlTypeBool>,
+            {}
+
+            impl<Lhs, QS, W, C, G, H, O, L, LM> BuildSql for $ty<Lhs, QS, W, C, G, H, O, L, LM>
+            where
+                QS: BuildSql,
+                C: BuildSql + Columns,
+                W: BuildSql,
+                G: BuildSql,
+                H: BuildSql,
+                O: BuildSql,
+                L: BuildSql,
+                LM: BuildSql,
+                Lhs: Expression + BuildSql,
+                Lhs::SqlType: Comparable<C::SqlType>,
+            {
+                fn build_sql(
+                    &self,
+                    buf: &mut Vec<u8>,
+                    params: &mut Vec<Value>,
+                ) -> Result<(), BuildSqlError> {
+                    (|| -> Result<(), anyhow::Error> {
+                        self.lhs.build_sql(buf, params)?;
+                        write!(buf, $op)?;
+                        self.rhs.build_sql(buf, params)?;
+                        Ok(())
+                    })()
+                    .map_err(From::from)
+                }
+            }
+        )*
+    };
+}
+
+impl_subquery_bool_binary_operators!(
+    (EqAny, " = ANY "),
+    (NotEqAny, " != ANY "),
+    (GtAny, " > ANY "),
+    (GeAny, " >= ANY "),
+    (LtAny, " < ANY "),
+    (LeAny, " <= ANY "),
+    (EqAll, " = ALL "),
+    (NotEqAll, " != ALL "),
+    (GtAll, " > ALL "),
+    (GeAll, " >= ALL "),
+    (LtAll, " < ALL "),
+    (LeAll, " <= ALL "),
+);
+
 #[derive(Debug, Clone)]
 pub struct Between<T, L, U>
 where
@@ -2181,6 +2278,111 @@ where
     }
 }
 
+// これをSelectBuilder毎に定義する必要がある
+// DBによってサポートしてたりしてなかったりなので、それが正しいのかもしれない
+pub trait SubQueryCompareBinaryOperatorMethod<QS, W, C, G, H, O, L, LM>:
+    Expression + Sized
+where
+    C: Columns,
+    Self::SqlType: Comparable<C::SqlType>,
+{
+    /// SQL `= ANY (...)`.
+    fn eq_any(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> EqAny<Self, QS, W, C, G, H, O, L, LM> {
+        EqAny { lhs: self, rhs }
+    }
+
+    /// SQL `!= ANY (...)`.
+    fn not_eq_any(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> NotEqAny<Self, QS, W, C, G, H, O, L, LM> {
+        NotEqAny { lhs: self, rhs }
+    }
+
+    /// SQL `> ANY (...)`.
+    fn gt_any(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> GtAny<Self, QS, W, C, G, H, O, L, LM> {
+        GtAny { lhs: self, rhs }
+    }
+
+    /// SQL `>= ANY (...)`.
+    fn ge_any(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> GeAny<Self, QS, W, C, G, H, O, L, LM> {
+        GeAny { lhs: self, rhs }
+    }
+
+    /// SQL `< ANY (...)`.
+    fn lt_any(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> LtAny<Self, QS, W, C, G, H, O, L, LM> {
+        LtAny { lhs: self, rhs }
+    }
+
+    /// SQL `<= ANY (...)`.
+    fn le_any(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> LeAny<Self, QS, W, C, G, H, O, L, LM> {
+        LeAny { lhs: self, rhs }
+    }
+
+    /// SQL `= ALL (...)`.
+    fn eq_all(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> EqAll<Self, QS, W, C, G, H, O, L, LM> {
+        EqAll { lhs: self, rhs }
+    }
+
+    /// SQL `!= ALL (...)`.
+    fn not_eq_all(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> NotEqAll<Self, QS, W, C, G, H, O, L, LM> {
+        NotEqAll { lhs: self, rhs }
+    }
+
+    /// SQL `> ALL (...)`.
+    fn gt_all(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> GtAll<Self, QS, W, C, G, H, O, L, LM> {
+        GtAll { lhs: self, rhs }
+    }
+
+    /// SQL `>= ALL (...)`.
+    fn ge_all(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> GeAll<Self, QS, W, C, G, H, O, L, LM> {
+        GeAll { lhs: self, rhs }
+    }
+
+    /// SQL `< ALL (...)`.
+    fn lt_all(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> LtAll<Self, QS, W, C, G, H, O, L, LM> {
+        LtAll { lhs: self, rhs }
+    }
+
+    /// SQL `<= ALL (...)`.
+    fn le_all(
+        self,
+        rhs: SelectBuilder<QS, W, C, G, H, O, L, LM>,
+    ) -> LeAll<Self, QS, W, C, G, H, O, L, LM> {
+        LeAll { lhs: self, rhs }
+    }
+}
+
 pub trait BetweenOperatorMethod<L, U>: Expression + Sized
 where
     L: Expression,
@@ -2241,6 +2443,15 @@ where
     L: Expression,
     R: Expression,
     L::SqlType: Comparable<R::SqlType>,
+{
+}
+
+impl<Lhs, QS, W, C, G, H, O, L, LM> SubQueryCompareBinaryOperatorMethod<QS, W, C, G, H, O, L, LM>
+    for Lhs
+where
+    C: Columns,
+    Lhs: Expression,
+    Lhs::SqlType: Comparable<C::SqlType>,
 {
 }
 

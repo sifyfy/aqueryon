@@ -408,3 +408,107 @@ fn tuple_subquery() {
     assert_eq!(buf, b"(?, ?) = (SELECT t1.c1, t1.c2 FROM table1 as t1)");
     assert_eq!(params, &[Value::Int(1), Value::String("aiueo".to_string())]);
 }
+
+#[test]
+fn subquery_compare_binary_operators() {
+    fn test<T: BuildSql + Sized>(
+        op: impl Fn(
+            SqlInt,
+            SelectBuilder<
+                FromClause<QuerySourceRef<TableName<'static, AnyDatabase>>>,
+                EmptyWhereClause,
+                Column<SqlTypeAny>,
+                EmptyGroupByClause,
+                EmptyHavingClause,
+                EmptyOrderByClause,
+                EmptyLimitClause,
+                LockModeDefaultBehavior,
+            >,
+        ) -> T,
+        query_expected: &str,
+        params_expected: &[Value],
+    ) {
+        // let (builder, t1) = EmptySelectBuilder::new().source("table1");
+        let (sub_builder, t1) = EmptySelectBuilder::new().source("table1");
+        let mut buf = Vec::new();
+        let mut params = Vec::new();
+        let exp = op(SqlInt::new(1), sub_builder.select(t1.column("c1")));
+        exp.build_sql(&mut buf, &mut params)
+            .expect("Success building SQL");
+
+        assert_eq!(String::from_utf8(buf).unwrap().as_str(), query_expected);
+        assert_eq!(params, params_expected);
+    }
+
+    test(
+        |l, r| l.eq_any(r),
+        "? = ANY (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.not_eq_any(r),
+        "? != ANY (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.gt_any(r),
+        "? > ANY (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.ge_any(r),
+        "? >= ANY (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.lt_any(r),
+        "? < ANY (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.le_any(r),
+        "? <= ANY (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.eq_all(r),
+        "? = ALL (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.not_eq_all(r),
+        "? != ALL (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.gt_all(r),
+        "? > ALL (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.ge_all(r),
+        "? >= ALL (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.lt_all(r),
+        "? < ALL (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+
+    test(
+        |l, r| l.le_all(r),
+        "? <= ALL (SELECT t1.c1 FROM table1 as t1)",
+        &[Value::Int(1)],
+    );
+}
