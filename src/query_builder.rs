@@ -45,7 +45,7 @@ pub mod synonym {
     pub type IntoNullableQuerySourceRef<QS> = qb::QuerySourceRef<IntoNullableQuerySource<QS>>;
 }
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::convert::TryInto;
 use std::io::Write;
@@ -115,7 +115,7 @@ define_select_clause!(HavingClause, EmptyHavingClause, " HAVING ");
 define_select_clause!(OrderByClause, EmptyOrderByClause, " ORDER BY ");
 define_select_clause!(LimitClause, EmptyLimitClause, " LIMIT ");
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SelectBuilder<QS, W, C, G, H, O, L, LM> {
     sources: QS,
     sources_num: u8,
@@ -691,6 +691,53 @@ where
     type Aggregation = NonAggregate; // サブクエリなので必ず値になる
 }
 
+impl<W, C, G, H, O, L, LM> QuerySource for SelectBuilder<EmptyFromClause, W, C, G, H, O, L, LM> {
+    type Database = AnyDatabase;
+    type NullableSelf = Self;
+
+    fn nullable(self) -> Self::NullableSelf {
+        self
+    }
+}
+
+impl<DB, QS, W, C, G, H, O, L, LM> QuerySource
+    for SelectBuilder<FromClause<QS>, W, C, G, H, O, L, LM>
+where
+    QS: QuerySource<Database = DB>,
+{
+    type Database = DB;
+    type NullableSelf = Self;
+
+    fn nullable(self) -> Self::NullableSelf {
+        self
+    }
+}
+
+impl<W, C, G, H, O, L, LM> IntoQuerySource
+    for SelectBuilder<EmptyFromClause, W, C, G, H, O, L, LM>
+{
+    type Database = AnyDatabase;
+    type QuerySource = Self;
+
+    fn into_query_source(self) -> Self::QuerySource {
+        self
+    }
+}
+
+impl<DB, QS, W, C, G, H, O, L, LM> IntoQuerySource
+    for SelectBuilder<FromClause<QS>, W, C, G, H, O, L, LM>
+where
+    DB: Clone,
+    QS: QuerySource<Database = DB>,
+{
+    type Database = DB;
+    type QuerySource = Self;
+
+    fn into_query_source(self) -> Self::QuerySource {
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Query {
     sql: String,
@@ -1021,7 +1068,41 @@ impl<ST> Expression for Column<ST> {
     type Aggregation = NonAggregate;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct ColumnAlias<'a, T> {
+    value: T,
+    alias: Cow<'a, str>,
+}
+
+impl<'a, T> ColumnAlias<'a, T> {
+    pub fn new(value: T, alias: &'a str) -> ColumnAlias<'a, T> {
+        ColumnAlias {
+            value,
+            alias: Cow::from(alias),
+        }
+    }
+}
+
+impl<'a, T> Columns for ColumnAlias<'a, T>
+where
+    T: Expression,
+{
+    type SqlType = T::SqlType;
+    type Aggregation = T::Aggregation;
+}
+
+impl<T> BuildSql for ColumnAlias<'_, T>
+where
+    T: BuildSql,
+{
+    fn build_sql(&self, buf: &mut Vec<u8>, params: &mut Vec<Value>) -> Result<(), BuildSqlError> {
+        self.value.build_sql(buf, params)?;
+        write!(buf, " as {}", self.alias)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
 pub struct SourceAliasName {
     name: Rc<RefCell<&'static str>>,
 }
@@ -1900,7 +1981,7 @@ impl_bool_binary_operators!(
 macro_rules! impl_subquery_bool_binary_operators {
     ( $( ( $ty:ident, $op:expr ) ),* $(,)* ) => {
         $(
-            #[derive(Debug, Clone)]
+            #[derive(Clone)]
             pub struct $ty<Lhs, QS, W, C, G, H, O, L, LM>
             where
                 C: Columns,
@@ -2890,8 +2971,69 @@ macro_rules! build_sql_comma_separated_values {
 // SQLは動的型付けなので関数も動的な型に対応できる必要がある。
 // 例えばsumは整数型にも実数型にも使えるので、複数の型を取り得る。
 // なので関数はtraitとして実装した方が良いのではないか？
-define_sql_function!(Sum, sum(t: SqlTypeInt) -> SqlTypeInt, Aggregate);
+// define_sql_function!(SumInt, sum(t: SqlTypeInt) -> SqlTypeInt, Aggregate);
 define_sql_function!(Count, count(t: SqlTypeAny) -> SqlTypeInt, Aggregate);
 
 define_sql_function!(Date, date(t: SqlTypeString) -> SqlTypeString, NonAggregate);
 define_sql_function!(Left, left(t: SqlTypeString, n: SqlTypeInt) -> SqlTypeString, NonAggregate);
+
+pub trait SqlKindNumber {}
+
+impl SqlKindNumber for SqlTypeInt {}
+impl SqlKindNumber for SqlTypeUint {}
+impl SqlKindNumber for SqlTypeAny {}
+
+#[derive(Debug, Clone)]
+pub struct Sum<T>
+where
+    T: Expression,
+    T::SqlType: SqlKindNumber,
+{
+    t: T,
+}
+
+impl<T> Sum<T>
+where
+    T: Expression,
+    T::SqlType: SqlKindNumber,
+{
+    pub fn new(t: T) -> Sum<T> {
+        Sum { t }
+    }
+}
+
+pub fn sum<T>( t: T ) -> Sum<T>
+where
+    T: Expression,
+    T::SqlType: SqlKindNumber,
+{
+    Sum::new(t)
+}
+
+impl<T> Expression for Sum<T>
+where
+    T: Expression,
+    T::SqlType: SqlKindNumber,
+{
+    type SqlType = T::SqlType;
+    type Term = Monomial;
+    type BoolOperation = NonBool;
+    type Aggregation = Aggregate;
+}
+
+impl<T> BuildSql for Sum<T>
+where
+    T: BuildSql + Expression,
+    T::SqlType: SqlKindNumber,
+{
+    fn build_sql(
+        &self,
+        buf: &mut Vec<u8>,
+        params: &mut Vec<Value>,
+    ) -> Result<(), BuildSqlError> {
+        write!(buf, "sum(")?;
+        self.t.build_sql(buf, params)?;
+        write!(buf, ")")?;
+        Ok(())
+    }
+}

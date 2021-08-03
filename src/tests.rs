@@ -512,3 +512,85 @@ fn subquery_compare_binary_operators() {
         &[Value::Int(1)],
     );
 }
+
+#[test]
+fn source_subquery() {
+    let (sub_builder, sub_t1) = EmptySelectBuilder::new().source("table1");
+    let (builder, t1) = EmptySelectBuilder::new().source(sub_builder.select(sub_t1.column("c1")));
+    let query = builder
+        .select(t1.column("c1"))
+        .build()
+        .expect("Failed to build SQL");
+
+    assert_eq!(
+        query.sql(),
+        "SELECT t1.c1 FROM (SELECT t1.c1 FROM table1 as t1) as t1;"
+    );
+    assert_eq!(query.params(), &[]);
+}
+
+#[test]
+fn source_subquery_with_empty_source() {
+    let sub_builder = EmptySelectBuilder::new();
+    let (builder, t1) = EmptySelectBuilder::new()
+        .source(sub_builder.select(ColumnAlias::new(SqlInt::new(1), "c1")));
+    let query = builder
+        .select(t1.column("c1"))
+        .build()
+        .expect("Failed to build SQL");
+
+    assert_eq!(query.sql(), "SELECT t1.c1 FROM (SELECT ? as c1) as t1;");
+    assert_eq!(query.params(), &[Value::Int(1)]);
+}
+
+#[test]
+fn correlated_subquery() {
+    let (builder, t1) = EmptySelectBuilder::new().source("table1");
+    let (mut sub_builder, sub_t1) = EmptySelectBuilder::new().source("table2");
+    sub_builder.change_sources_alias_name("u");
+    let query = builder
+        .filter(
+            t1.column("c1").eq(sub_builder
+                .filter(sub_t1.column("c2").eq(t1.column("c2")))
+                .select(sub_t1.column("c1")))
+        )
+        .select(t1.column("c3"))
+        .build()
+        .expect("Failed to build SQL");
+
+    assert_eq!(query.sql(), "SELECT t1.c3 FROM table1 as t1 WHERE t1.c1 = (SELECT u1.c1 FROM table2 as u1 WHERE u1.c2 = t1.c2);");
+    assert_eq!(query.params(), &[]);
+}
+
+#[test]
+fn function_sum_int() {
+    let (builder, _t1) = EmptySelectBuilder::new().source("table1");
+    let query = builder
+    .select(sum(SqlInt::new(1)))
+    .build()
+    .expect("Failed to build SQL");
+    assert_eq!(query.sql(), "SELECT sum(?) FROM table1 as t1;");
+    assert_eq!(query.params(), &[Value::Int(1)]);
+}
+
+#[test]
+fn function_sum_uint() {
+    let (builder, _t1) = EmptySelectBuilder::new().source("table1");
+    let query = builder
+    .select(sum(SqlUint::new(1)))
+    .build()
+    .expect("Failed to build SQL");
+    assert_eq!(query.sql(), "SELECT sum(?) FROM table1 as t1;");
+    assert_eq!(query.params(), &[Value::Uint(1)]);
+}
+
+#[test]
+fn function_sum_any() {
+    let (builder, t1) = EmptySelectBuilder::new().source("table1");
+    let query = builder
+    .select(sum(t1.column("c1")))
+    .build()
+    .expect("Failed to build SQL");
+    assert_eq!(query.sql(), "SELECT sum(t1.c1) FROM table1 as t1;");
+    assert_eq!(query.params(), &[]);
+}
