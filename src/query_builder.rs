@@ -3002,7 +3002,7 @@ where
     }
 }
 
-pub fn sum<T>( t: T ) -> Sum<T>
+pub fn sum<T>(t: T) -> Sum<T>
 where
     T: Expression,
     T::SqlType: SqlKindNumber,
@@ -3026,11 +3026,7 @@ where
     T: BuildSql + Expression,
     T::SqlType: SqlKindNumber,
 {
-    fn build_sql(
-        &self,
-        buf: &mut Vec<u8>,
-        params: &mut Vec<Value>,
-    ) -> Result<(), BuildSqlError> {
+    fn build_sql(&self, buf: &mut Vec<u8>, params: &mut Vec<Value>) -> Result<(), BuildSqlError> {
         write!(buf, "sum(")?;
         self.t.build_sql(buf, params)?;
         write!(buf, ")")?;

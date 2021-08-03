@@ -552,7 +552,7 @@ fn correlated_subquery() {
         .filter(
             t1.column("c1").eq(sub_builder
                 .filter(sub_t1.column("c2").eq(t1.column("c2")))
-                .select(sub_t1.column("c1")))
+                .select(sub_t1.column("c1"))),
         )
         .select(t1.column("c3"))
         .build()
@@ -566,9 +566,9 @@ fn correlated_subquery() {
 fn function_sum_int() {
     let (builder, _t1) = EmptySelectBuilder::new().source("table1");
     let query = builder
-    .select(sum(SqlInt::new(1)))
-    .build()
-    .expect("Failed to build SQL");
+        .select(sum(SqlInt::new(1)))
+        .build()
+        .expect("Failed to build SQL");
     assert_eq!(query.sql(), "SELECT sum(?) FROM table1 as t1;");
     assert_eq!(query.params(), &[Value::Int(1)]);
 }
@@ -577,9 +577,9 @@ fn function_sum_int() {
 fn function_sum_uint() {
     let (builder, _t1) = EmptySelectBuilder::new().source("table1");
     let query = builder
-    .select(sum(SqlUint::new(1)))
-    .build()
-    .expect("Failed to build SQL");
+        .select(sum(SqlUint::new(1)))
+        .build()
+        .expect("Failed to build SQL");
     assert_eq!(query.sql(), "SELECT sum(?) FROM table1 as t1;");
     assert_eq!(query.params(), &[Value::Uint(1)]);
 }
@@ -588,9 +588,9 @@ fn function_sum_uint() {
 fn function_sum_any() {
     let (builder, t1) = EmptySelectBuilder::new().source("table1");
     let query = builder
-    .select(sum(t1.column("c1")))
-    .build()
-    .expect("Failed to build SQL");
+        .select(sum(t1.column("c1")))
+        .build()
+        .expect("Failed to build SQL");
     assert_eq!(query.sql(), "SELECT sum(t1.c1) FROM table1 as t1;");
     assert_eq!(query.params(), &[]);
 }
