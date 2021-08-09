@@ -54,6 +54,527 @@ use std::rc::Rc;
 use std::string::FromUtf8Error;
 pub use synonym::EmptySelectBuilder;
 
+// とりあえず名前は適当に。
+//
+// 新しい引数を取って、新しい型を返す必要がある。
+// これってナイーブに表現すると新しい型パラメータを持った型を返す必要があるのでGATが必要なのでは？
+// Fromみたいな感じに実装することでGAT無しでの実装をやってみて、だめならGATを使う（たぶんできそう）
+
+pub trait NewSelect: Default {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl NewSelect for synonym::EmptySelectBuilder {}
+
+pub trait SelectSource<T>
+where
+    T: IntoQuerySource,
+    T::QuerySource: QuerySource + Clone,
+{
+    type Next: Sized;
+    fn source(self, source: T) -> (Self::Next, synonym::IntoQuerySourceRef<T>);
+}
+
+impl<T> SelectSource<T> for synonym::EmptySelectBuilder
+where
+    T: IntoQuerySource,
+    T::QuerySource: QuerySource + Clone,
+{
+    type Next = synonym::SourceUpdatedBuilder<synonym::IntoQuerySourceRef<T>>;
+    fn source(self, source: T) -> (Self::Next, synonym::IntoQuerySourceRef<T>) {
+        let sources_num = self.sources_num + 1;
+        let src_ref = QuerySourceRef::new(
+            source.into_query_source(),
+            SourceAlias::new(self.sources_alias_name.clone(), sources_num),
+        );
+        let ret_src_ref = src_ref.clone();
+        let new_builder = SelectBuilder {
+            sources: FromClause::new(src_ref),
+            sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns: (),
+            group_by: self.group_by,
+            having: self.having,
+            order_by: self.order_by,
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        };
+        (new_builder, ret_src_ref)
+    }
+}
+
+pub trait SelectInnerJoin<T, ON, EXP>
+where
+    T: IntoQuerySource,
+    T::QuerySource: QuerySource + Clone,
+{
+    type Next;
+    fn inner_join(self, source: T, on: ON) -> (Self::Next, synonym::IntoQuerySourceRef<T>);
+}
+
+type JoinableSelect<QS> = SelectBuilder<
+    FromClause<QS>,
+    EmptyWhereClause,
+    (),
+    EmptyGroupByClause,
+    EmptyHavingClause,
+    EmptyOrderByClause,
+    EmptyLimitClause,
+    LockModeDefaultBehavior,
+>;
+
+impl<QS, QS2, ON, EXP> SelectInnerJoin<QS2, ON, EXP> for JoinableSelect<QS>
+where
+    QS: QuerySource,
+    QS2: IntoQuerySource,
+    QS2::QuerySource: QuerySource + Clone,
+    QS2::Database: Joinable<QS::Database>,
+    ON: FnMut(QuerySourceRef<QS2::QuerySource>) -> EXP,
+    EXP: Expression<SqlType = SqlTypeBool>,
+{
+    type Next = synonym::SourceUpdatedBuilder<synonym::Join<QS, QS2, EXP>>;
+
+    fn inner_join(self, source: QS2, mut on: ON) -> (Self::Next, synonym::IntoQuerySourceRef<QS2>) {
+        let sources_num = self.sources_num + 1;
+        let src_ref = QuerySourceRef::new(
+            source.into_query_source(),
+            SourceAlias::new(self.sources_alias_name.clone(), sources_num),
+        );
+        let ret_src_ref = src_ref.clone();
+        let on_expr = on(src_ref.clone());
+        let new_builder = SelectBuilder {
+            sources: FromClause::new(Join::Inner(self.sources.unwrap(), src_ref, on_expr)),
+            sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns: (),
+            group_by: self.group_by,
+            having: self.having,
+            order_by: self.order_by,
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        };
+        (new_builder, ret_src_ref)
+    }
+}
+
+pub trait SelectLeftOuterJoin<QS2, ON, EXP>
+where
+    QS2: IntoQuerySource,
+    QS2::QuerySource: QuerySource + Clone,
+{
+    type Next;
+    fn left_outer_join(
+        self,
+        source: QS2,
+        on: ON,
+    ) -> (Self::Next, synonym::IntoNullableQuerySourceRef<QS2>);
+}
+
+impl<QS, QS2, ON, EXP> SelectLeftOuterJoin<QS2, ON, EXP> for JoinableSelect<QS>
+where
+    QS: QuerySource,
+    QS2: IntoQuerySource,
+    QS2::QuerySource: QuerySource + Clone,
+    QS2::Database: Joinable<QS::Database>,
+    <QS2::QuerySource as QuerySource>::NullableSelf: Clone,
+    ON: FnMut(QuerySourceRef<<QS2::QuerySource as QuerySource>::NullableSelf>) -> EXP,
+    EXP: Expression<SqlType = SqlTypeBool>,
+{
+    type Next = synonym::SourceUpdatedBuilder<synonym::LeftOuterJoin<QS, QS2, EXP>>;
+
+    fn left_outer_join(
+        self,
+        source: QS2,
+        mut on: ON,
+    ) -> (Self::Next, synonym::IntoNullableQuerySourceRef<QS2>) {
+        let sources_num = self.sources_num + 1;
+        let src_ref = QuerySourceRef::new(
+            source.into_query_source().nullable(),
+            SourceAlias::new(self.sources_alias_name.clone(), sources_num),
+        );
+        let ret_src_ref = src_ref.clone();
+        let on_expr = on(src_ref.clone());
+        let new_builder = SelectBuilder {
+            sources: FromClause::new(Join::LeftOuter(self.sources.unwrap(), src_ref, on_expr)),
+            sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns: (),
+            group_by: self.group_by,
+            having: self.having,
+            order_by: self.order_by,
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        };
+        (new_builder, ret_src_ref)
+    }
+}
+
+pub trait SelectCrossJoin<QS2>
+where
+    QS2: IntoQuerySource,
+    QS2::QuerySource: QuerySource + Clone,
+{
+    type Next;
+    fn cross_join(self, source: QS2) -> (Self::Next, synonym::IntoQuerySourceRef<QS2>);
+}
+
+impl<QS, QS2> SelectCrossJoin<QS2>
+    for SelectBuilder<
+        FromClause<QS>,
+        EmptyWhereClause,
+        (),
+        EmptyGroupByClause,
+        EmptyHavingClause,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >
+where
+    QS: QuerySource,
+    QS2: IntoQuerySource,
+    QS2::Database: Joinable<QS::Database>,
+    QS2::QuerySource: QuerySource + Clone,
+{
+    type Next = synonym::SourceUpdatedBuilder<synonym::CrossJoin<QS, QS2>>;
+
+    fn cross_join(self, source: QS2) -> (Self::Next, synonym::IntoQuerySourceRef<QS2>) {
+        let sources_num = self.sources_num + 1;
+        let src_ref = QuerySourceRef::new(
+            source.into_query_source(),
+            SourceAlias::new(self.sources_alias_name.clone(), sources_num),
+        );
+        let ret_src_ref = src_ref.clone();
+        let new_builder = SelectBuilder {
+            sources: FromClause::new(Join::Cross(self.sources.unwrap(), src_ref)),
+            sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns: (),
+            group_by: self.group_by,
+            having: self.having,
+            order_by: self.order_by,
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        };
+        (new_builder, ret_src_ref)
+    }
+}
+
+pub trait SelectColumns<C>
+where
+    C: Columns,
+{
+    type Next;
+    fn select(self, columns: C) -> Self::Next;
+}
+
+impl<C, QS, W> SelectColumns<C>
+    for SelectBuilder<
+        QS,
+        W,
+        (),
+        EmptyGroupByClause,
+        EmptyHavingClause,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >
+where
+    C: Columns,
+{
+    type Next = SelectBuilder<
+        QS,
+        W,
+        C,
+        EmptyGroupByClause,
+        EmptyHavingClause,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >;
+    fn select(self, columns: C) -> Self::Next {
+        SelectBuilder {
+            sources: self.sources,
+            sources_num: self.sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns,
+            group_by: self.group_by,
+            having: self.having,
+            order_by: self.order_by,
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        }
+    }
+}
+
+pub trait SelectFilter<W>
+where
+    W: Expression<SqlType = SqlTypeBool, Aggregation = NonAggregate>,
+{
+    type Next;
+    fn filter(self, expr: W) -> Self::Next;
+}
+
+impl<QS, W, C> SelectFilter<W>
+    for SelectBuilder<
+        FromClause<QS>,
+        EmptyWhereClause,
+        C,
+        EmptyGroupByClause,
+        EmptyHavingClause,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >
+where
+    W: Expression<SqlType = SqlTypeBool, Aggregation = NonAggregate>,
+{
+    type Next = SelectBuilder<
+        FromClause<QS>,
+        WhereClause<W>,
+        C,
+        EmptyGroupByClause,
+        EmptyHavingClause,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >;
+    fn filter(self, expr: W) -> Self::Next {
+        SelectBuilder {
+            sources: self.sources,
+            sources_num: self.sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: WhereClause::new(expr),
+            columns: self.columns,
+            group_by: self.group_by,
+            having: self.having,
+            order_by: self.order_by,
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        }
+    }
+}
+
+pub trait SelectGroupBy<G>
+where
+    G: Columns<Aggregation = NonAggregate>,
+{
+    type Next;
+    fn group_by(self, group: G) -> Self::Next;
+}
+
+impl<QS, W, C, G> SelectGroupBy<G>
+    for SelectBuilder<
+        FromClause<QS>,
+        W,
+        C,
+        EmptyGroupByClause,
+        EmptyHavingClause,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >
+where
+    G: Columns<Aggregation = NonAggregate>,
+{
+    type Next = SelectBuilder<
+        FromClause<QS>,
+        W,
+        C,
+        GroupByClause<G>,
+        EmptyHavingClause,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >;
+    fn group_by(self, group: G) -> Self::Next {
+        SelectBuilder {
+            sources: self.sources,
+            sources_num: self.sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns: self.columns,
+            group_by: GroupByClause::new(group),
+            having: self.having,
+            order_by: self.order_by,
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        }
+    }
+}
+
+pub trait SelectHaving<H>
+where
+    H: Expression<SqlType = SqlTypeBool>,
+{
+    type Next;
+    fn having(self, having: H) -> Self::Next;
+}
+
+impl<QS, W, C, G, H> SelectHaving<H>
+    for SelectBuilder<
+        FromClause<QS>,
+        W,
+        C,
+        GroupByClause<G>,
+        EmptyHavingClause,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >
+where
+    QS: QuerySource,
+    G: Columns,
+    H: Expression<SqlType = SqlTypeBool>,
+{
+    type Next = SelectBuilder<
+        FromClause<QS>,
+        W,
+        C,
+        GroupByClause<G>,
+        HavingClause<H>,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >;
+    fn having(self, having: H) -> Self::Next {
+        SelectBuilder {
+            sources: self.sources,
+            sources_num: self.sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns: self.columns,
+            group_by: self.group_by,
+            having: HavingClause::new(having),
+            order_by: self.order_by,
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        }
+    }
+}
+
+pub trait SelectOrderBy<O>
+where
+    O: Orders,
+{
+    type Next;
+    fn order_by(self, order: O) -> Self::Next;
+}
+
+impl<QS, W, C, G, H, O> SelectOrderBy<O>
+    for SelectBuilder<
+        FromClause<QS>,
+        W,
+        C,
+        G,
+        H,
+        EmptyOrderByClause,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >
+where
+    QS: QuerySource,
+    O: Orders,
+{
+    type Next = SelectBuilder<
+        FromClause<QS>,
+        W,
+        C,
+        G,
+        H,
+        OrderByClause<O>,
+        EmptyLimitClause,
+        LockModeDefaultBehavior,
+    >;
+    fn order_by(self, order: O) -> Self::Next {
+        SelectBuilder {
+            sources: self.sources,
+            sources_num: self.sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns: self.columns,
+            group_by: self.group_by,
+            having: self.having,
+            order_by: OrderByClause::new(order),
+            limit: self.limit,
+            lock_mode: self.lock_mode,
+        }
+    }
+}
+
+pub trait SelectLimit<L>
+where
+    L: Into<Limit>,
+{
+    type Next;
+    fn limit(self, limit: L) -> Self::Next;
+}
+
+impl<QS, W, C, G, H, O, L> SelectLimit<L>
+    for SelectBuilder<FromClause<QS>, W, C, G, H, O, EmptyLimitClause, LockModeDefaultBehavior>
+where
+    QS: QuerySource,
+    L: Into<Limit>,
+{
+    type Next =
+        SelectBuilder<FromClause<QS>, W, C, G, H, O, LimitClause<Limit>, LockModeDefaultBehavior>;
+    fn limit(self, limit: L) -> Self::Next {
+        SelectBuilder {
+            sources: self.sources,
+            sources_num: self.sources_num,
+            sources_alias_name: self.sources_alias_name,
+            filter: self.filter,
+            columns: self.columns,
+            group_by: self.group_by,
+            having: self.having,
+            order_by: self.order_by,
+            limit: LimitClause::new(limit.into()),
+            lock_mode: self.lock_mode,
+        }
+    }
+}
+
+pub trait SelectForUpdate {
+    type Next;
+    fn for_update(self) -> Self::Next;
+}
+
+impl<QS, W, C, G, H, O, L> SelectForUpdate
+    for SelectBuilder<FromClause<QS>, W, C, G, H, O, L, LockModeDefaultBehavior>
+where
+    QS: QuerySource,
+{
+    type Next = SelectBuilder<FromClause<QS>, W, C, G, H, O, L, ForUpdate>;
+    fn for_update(self) -> Self::Next {
+        self.set_lock_mode(ForUpdate)
+    }
+}
+
+pub trait SelectLockInShareMode {
+    type Next;
+    fn for_update(self) -> Self::Next;
+}
+
+impl<QS, W, C, G, H, O, L> SelectLockInShareMode
+    for SelectBuilder<FromClause<QS>, W, C, G, H, O, L, LockModeDefaultBehavior>
+where
+    QS: QuerySource,
+{
+    type Next = SelectBuilder<FromClause<QS>, W, C, G, H, O, L, LockInShareMode>;
+    fn for_update(self) -> Self::Next {
+        self.set_lock_mode(LockInShareMode)
+    }
+}
+
+// SelectBuilderが実装する各機能のI/Fをtraitに切り出す
+// こうすすること
+
 macro_rules! define_select_clause {
     ( $type_name:ident, $empty_type:tt, $clause:expr ) => {
         #[derive(Debug, Clone, Default)]
@@ -183,58 +704,6 @@ impl synonym::EmptySelectBuilder {
     pub fn new() -> synonym::EmptySelectBuilder {
         Default::default()
     }
-
-    pub fn source<QS>(
-        self,
-        source: QS,
-    ) -> (
-        synonym::SourceUpdatedBuilder<synonym::IntoQuerySourceRef<QS>>,
-        synonym::IntoQuerySourceRef<QS>,
-    )
-    where
-        QS: IntoQuerySource,
-        QS::QuerySource: QuerySource + Clone,
-    {
-        let sources_num = self.sources_num + 1;
-        let src_ref = QuerySourceRef::new(
-            source.into_query_source(),
-            SourceAlias::new(self.sources_alias_name.clone(), sources_num),
-        );
-        let ret_src_ref = src_ref.clone();
-        let new_builder = SelectBuilder {
-            sources: FromClause::new(src_ref),
-            sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns: (),
-            group_by: self.group_by,
-            having: self.having,
-            order_by: self.order_by,
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        };
-        (new_builder, ret_src_ref)
-    }
-}
-
-impl<QS, W, G, H, O, L, LM> SelectBuilder<QS, W, (), G, H, O, L, LM> {
-    pub fn select<C>(self, columns: C) -> SelectBuilder<QS, W, C, G, H, O, L, LM>
-    where
-        C: Columns,
-    {
-        SelectBuilder {
-            sources: self.sources,
-            sources_num: self.sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns,
-            group_by: self.group_by,
-            having: self.having,
-            order_by: self.order_by,
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        }
-    }
 }
 
 impl<QS>
@@ -251,81 +720,6 @@ impl<QS>
 where
     QS: QuerySource,
 {
-    pub fn inner_join<QS2, ON, EXP>(
-        self,
-        source: QS2,
-        mut on: ON,
-    ) -> (
-        synonym::SourceUpdatedBuilder<synonym::Join<QS, QS2, EXP>>,
-        synonym::IntoQuerySourceRef<QS2>,
-    )
-    where
-        QS2: IntoQuerySource,
-        QS2::Database: Joinable<QS::Database>,
-        QS2::QuerySource: QuerySource + Clone,
-        ON: FnMut(QuerySourceRef<QS2::QuerySource>) -> EXP,
-        EXP: Expression<SqlType = SqlTypeBool>,
-    {
-        let sources_num = self.sources_num + 1;
-        let src_ref = QuerySourceRef::new(
-            source.into_query_source(),
-            SourceAlias::new(self.sources_alias_name.clone(), sources_num),
-        );
-        let ret_src_ref = src_ref.clone();
-        let on_expr = on(src_ref.clone());
-        let new_builder = SelectBuilder {
-            sources: FromClause::new(Join::Inner(self.sources.unwrap(), src_ref, on_expr)),
-            sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns: (),
-            group_by: self.group_by,
-            having: self.having,
-            order_by: self.order_by,
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        };
-        (new_builder, ret_src_ref)
-    }
-
-    pub fn left_outer_join<QS2, ON, EXP>(
-        self,
-        source: QS2,
-        mut on: ON,
-    ) -> (
-        synonym::SourceUpdatedBuilder<synonym::LeftOuterJoin<QS, QS2, EXP>>,
-        synonym::IntoNullableQuerySourceRef<QS2>,
-    )
-    where
-        QS2: IntoQuerySource,
-        QS2::Database: Joinable<QS::Database>,
-        QS2::QuerySource: QuerySource + Clone,
-        <QS2::QuerySource as QuerySource>::NullableSelf: Clone,
-        ON: FnMut(QuerySourceRef<<QS2::QuerySource as QuerySource>::NullableSelf>) -> EXP,
-        EXP: Expression<SqlType = SqlTypeBool>,
-    {
-        let sources_num = self.sources_num + 1;
-        let src_ref = QuerySourceRef::new(
-            source.into_query_source().nullable(),
-            SourceAlias::new(self.sources_alias_name.clone(), sources_num),
-        );
-        let ret_src_ref = src_ref.clone();
-        let on_expr = on(src_ref.clone());
-        let new_builder = SelectBuilder {
-            sources: FromClause::new(Join::LeftOuter(self.sources.unwrap(), src_ref, on_expr)),
-            sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns: (),
-            group_by: self.group_by,
-            having: self.having,
-            order_by: self.order_by,
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        };
-        (new_builder, ret_src_ref)
-    }
-
     pub fn right_outer_join<QS2, ON, EXP>(
         self,
         source: QS2,
@@ -366,248 +760,12 @@ where
         };
         (new_builder, ret_src_ref)
     }
-
-    pub fn cross_join<QS2>(
-        self,
-        source: QS2,
-    ) -> (
-        synonym::SourceUpdatedBuilder<synonym::CrossJoin<QS, QS2>>,
-        synonym::IntoQuerySourceRef<QS2>,
-    )
-    where
-        QS2: IntoQuerySource,
-        QS2::Database: Joinable<QS::Database>,
-        QS2::QuerySource: QuerySource + Clone,
-    {
-        let sources_num = self.sources_num + 1;
-        let src_ref = QuerySourceRef::new(
-            source.into_query_source(),
-            SourceAlias::new(self.sources_alias_name.clone(), sources_num),
-        );
-        let ret_src_ref = src_ref.clone();
-        let new_builder = SelectBuilder {
-            sources: FromClause::new(Join::Cross(self.sources.unwrap(), src_ref)),
-            sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns: (),
-            group_by: self.group_by,
-            having: self.having,
-            order_by: self.order_by,
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        };
-        (new_builder, ret_src_ref)
-    }
-
-    pub fn filter<W>(
-        self,
-        expr: W,
-    ) -> SelectBuilder<
-        FromClause<QS>,
-        WhereClause<W>,
-        (),
-        EmptyGroupByClause,
-        EmptyHavingClause,
-        EmptyOrderByClause,
-        EmptyLimitClause,
-        LockModeDefaultBehavior,
-    >
-    where
-        W: Expression<SqlType = SqlTypeBool, Aggregation = NonAggregate>,
-    {
-        SelectBuilder {
-            sources: self.sources,
-            sources_num: self.sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: WhereClause::new(expr),
-            columns: (),
-            group_by: self.group_by,
-            having: self.having,
-            order_by: self.order_by,
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        }
-    }
-}
-
-impl<QS, W, C>
-    SelectBuilder<
-        FromClause<QS>,
-        W,
-        C,
-        EmptyGroupByClause,
-        EmptyHavingClause,
-        EmptyOrderByClause,
-        EmptyLimitClause,
-        LockModeDefaultBehavior,
-    >
-where
-    QS: QuerySource,
-{
-    pub fn group_by<G>(
-        self,
-        group: G,
-    ) -> SelectBuilder<
-        FromClause<QS>,
-        W,
-        C,
-        GroupByClause<G>,
-        EmptyHavingClause,
-        EmptyOrderByClause,
-        EmptyLimitClause,
-        LockModeDefaultBehavior,
-    >
-    where
-        G: Columns<Aggregation = NonAggregate>,
-    {
-        SelectBuilder {
-            sources: self.sources,
-            sources_num: self.sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns: self.columns,
-            group_by: GroupByClause::new(group),
-            having: self.having,
-            order_by: self.order_by,
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        }
-    }
-}
-
-impl<QS, W, C, G>
-    SelectBuilder<
-        FromClause<QS>,
-        W,
-        C,
-        GroupByClause<G>,
-        EmptyHavingClause,
-        EmptyOrderByClause,
-        EmptyLimitClause,
-        LockModeDefaultBehavior,
-    >
-where
-    QS: QuerySource,
-    G: Columns,
-{
-    pub fn having<H>(
-        self,
-        having: H,
-    ) -> SelectBuilder<
-        FromClause<QS>,
-        W,
-        C,
-        GroupByClause<G>,
-        HavingClause<H>,
-        EmptyOrderByClause,
-        EmptyLimitClause,
-        LockModeDefaultBehavior,
-    >
-    where
-        H: Expression<SqlType = SqlTypeBool>,
-    {
-        SelectBuilder {
-            sources: self.sources,
-            sources_num: self.sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns: self.columns,
-            group_by: self.group_by,
-            having: HavingClause::new(having),
-            order_by: self.order_by,
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        }
-    }
-}
-
-impl<QS, W, C, G, H>
-    SelectBuilder<
-        FromClause<QS>,
-        W,
-        C,
-        G,
-        H,
-        EmptyOrderByClause,
-        EmptyLimitClause,
-        LockModeDefaultBehavior,
-    >
-where
-    QS: QuerySource,
-{
-    pub fn order_by<O>(
-        self,
-        order: O,
-    ) -> SelectBuilder<
-        FromClause<QS>,
-        W,
-        C,
-        G,
-        H,
-        OrderByClause<O>,
-        EmptyLimitClause,
-        LockModeDefaultBehavior,
-    >
-    where
-        O: Orders,
-    {
-        SelectBuilder {
-            sources: self.sources,
-            sources_num: self.sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns: self.columns,
-            group_by: self.group_by,
-            having: self.having,
-            order_by: OrderByClause::new(order),
-            limit: self.limit,
-            lock_mode: self.lock_mode,
-        }
-    }
-}
-
-impl<QS, W, C, G, H, O>
-    SelectBuilder<FromClause<QS>, W, C, G, H, O, EmptyLimitClause, LockModeDefaultBehavior>
-where
-    QS: QuerySource,
-{
-    pub fn limit<L>(
-        self,
-        limit: L,
-    ) -> SelectBuilder<FromClause<QS>, W, C, G, H, O, LimitClause<Limit>, LockModeDefaultBehavior>
-    where
-        L: Into<Limit>,
-    {
-        SelectBuilder {
-            sources: self.sources,
-            sources_num: self.sources_num,
-            sources_alias_name: self.sources_alias_name,
-            filter: self.filter,
-            columns: self.columns,
-            group_by: self.group_by,
-            having: self.having,
-            order_by: self.order_by,
-            limit: LimitClause::new(limit.into()),
-            lock_mode: self.lock_mode,
-        }
-    }
 }
 
 impl<QS, W, C, G, H, O, L> SelectBuilder<FromClause<QS>, W, C, G, H, O, L, LockModeDefaultBehavior>
 where
     QS: QuerySource,
 {
-    pub fn for_update(self) -> SelectBuilder<FromClause<QS>, W, C, G, H, O, L, ForUpdate> {
-        self.set_lock_mode(ForUpdate)
-    }
-
-    pub fn lock_in_share_mode(
-        self,
-    ) -> SelectBuilder<FromClause<QS>, W, C, G, H, O, L, LockInShareMode> {
-        self.set_lock_mode(LockInShareMode)
-    }
-
     fn set_lock_mode<LM>(
         self,
         lock_mode: LM,
